@@ -49,7 +49,7 @@ EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Restart 
 $service.stopservice()
 Start-Sleep -s 15
 $service.startservice()
-', 
+', /*Sleep step is included to allow for ReportServer and ReportServerTempDB to complete failover process.  Need to add check to wait to restart until after this has happened.*/
 		@database_name=N'master', 
 		@flags=0
 IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
