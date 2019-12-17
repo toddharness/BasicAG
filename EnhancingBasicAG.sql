@@ -31,7 +31,7 @@ EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'RestartReportingServicesServ
 		@delete_level=0, 
 		@description=N'Will restart Reporting services service if failover occurred for reportserver database.', 
 		@category_name=N'AlwaysOn Maintenance', 
-		@owner_login_name=N'SQL-Lab\administrator', @job_id = @jobId OUTPUT
+		@owner_login_name=N'sa', @job_id = @jobId OUTPUT
 IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
 
 EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Restart Reporting Services', 
@@ -44,12 +44,7 @@ EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Restart 
 		@retry_attempts=0, 
 		@retry_interval=0, 
 		@os_run_priority=0, @subsystem=N'PowerShell', 
-		@command=N'$service = Get-WmiObject -ComputerName SQL2 -Class Win32_Service `
--Filter "Name=''ReportServer`$STANDARD2016''"
-$service.stopservice()
-Start-Sleep -s 15
-$service.startservice()
-', /*Sleep step is included to allow for ReportServer and ReportServerTempDB to complete failover process.  Need to add check to wait to restart until after this has happened.*/
+		@command=N'Get-Service -ComputerName SQL2 -Name "SQL Server Reporting Services (STANDARD2016)" | Restart-Service', 
 		@database_name=N'master', 
 		@flags=0
 IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
@@ -166,10 +161,32 @@ WHILE @INTCOUNTER <= @MAXINTCOUNTER  -- BEGIN LOOP
 	END
 
 -- REPORTING SERVICES MUST BE RESTARTED TO CREATE SUBSCRIPTIONS ON NEW REPLICA.
--- IF REPORTSERVER GROUPING IS INCLUDED IN FAILOVERS RESTART REPORT SERVER SERVICES.
+-- IF REPORTSERVER GROUPING IS INCLUDED IN FAILOVERS RESTART REPORT SERVER SERVICES
+DECLARE  @DesiredOperationalState	INT
+		,@ActualOperationalState	INT
+		,@ReportFailoverComplete	BIT = 0
+
 IF EXISTS (SELECT 1 FROM @AG_Groups where LEFT(RIGHT(ag_name,Len(ag_name)-CHARINDEX(@Delimiter,ag_name)),CHARINDEX(@Delimiter,RIGHT(ag_name,Len(ag_name)-CHARINDEX(@Delimiter,ag_name)-1))) = ''Reports'') -- ''REPORTS'' IS THE GROUP NAME FOR THE AG GROUPING THAT HAS THE REPORT SERVER DATABASE
 	BEGIN
-		EXEC msdb.dbo.sp_start_job N''RestartReportingServicesService''
+		WHILE @ReportFailoverComplete = 0
+			BEGIN
+				SELECT	 @DesiredOperationalState = count(ag_name)*2  /* OPERATIONAL_STATE ONLINE = 2 SO COUNT MUST BE DOUBLED*/
+						,@ActualOperationalState = SUM(CASE WHEN ARS.role = 1 then operational_state ELSE 0 END )  /* ONLY CONSIDER OPERATIONAL STATE WHEN DB IS PRIMARY ON THIS NODE.  THIS IS NOT IN WHERE CLAUSE TO AVOID FALSE GOOD CRITERIA.*/
+				FROM sys.dm_hadr_name_id_map imap 
+				INNER JOIN sys.dm_hadr_availability_replica_states ARS ON ARS.group_id = imap.ag_id 
+				WHERE	ARS.is_local = 1  -- ONLY CONSIDER LOCAL REPLICA''S
+					AND	LOWER(LEFT(RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)),CHARINDEX(@Delimiter,RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)-1)))) = ''reports''
+
+				IF ISNULL(@DesiredOperationalState,0) = ISNULL(@ActualOperationalState,0)
+					BEGIN
+						EXEC msdb.dbo.sp_start_job N''RestartReportingServicesService''
+						SELECT @ReportFailoverComplete = 1
+					END
+				IF @DesiredOperationalState <> @ActualOperationalState
+					BEGIN
+						WAITFOR DELAY ''00:00:02''
+					END
+			END		
 	END
 
 -- IF ONE NODE GOES DOWN AND AUTO FAILOVER HAPPENS RESTART REPORTING SERVICES IF SERVER HAS A REPORT SERVER DATABASE.  THIS IS NEEDED FOR WHEN AN AUTOMATIC FAILOVER OCCURS.
@@ -184,7 +201,25 @@ IF		EXISTS (SELECT 1 WHERE sys.fn_hadr_is_primary_replica (''ReportServer'') = 1
 					AND synchronization_state_desc = ''NOT SYNCHRONIZING''
 				)
 	BEGIN
-		EXEC msdb.dbo.sp_start_job N''RestartReportingServicesService''
+		WHILE @ReportFailoverComplete = 0
+			BEGIN
+				SELECT	 @DesiredOperationalState = count(ag_name)*2  /* OPERATIONAL_STATE ONLINE = 2 SO COUNT MUST BE DOUBLED*/
+						,@ActualOperationalState = SUM(CASE WHEN ARS.role = 1 then operational_state ELSE 0 END )  /* ONLY CONSIDER OPERATIONAL STATE WHEN DB IS PRIMARY ON THIS NODE.  THIS IS NOT IN WHERE CLAUSE TO AVOID FALSE GOOD CRITERIA.*/
+				FROM sys.dm_hadr_name_id_map imap 
+				INNER JOIN sys.dm_hadr_availability_replica_states ARS ON ARS.group_id = imap.ag_id 
+				WHERE	ARS.is_local = 1  -- ONLY CONSIDER LOCAL REPLICA''S
+					AND	LOWER(LEFT(RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)),CHARINDEX(@Delimiter,RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)-1)))) = ''reports''
+
+				IF ISNULL(@DesiredOperationalState,0) = ISNULL(@ActualOperationalState,0)
+					BEGIN
+						EXEC msdb.dbo.sp_start_job N''RestartReportingServicesService''
+						SELECT @ReportFailoverComplete = 1
+					END
+				IF @DesiredOperationalState <> @ActualOperationalState
+					BEGIN
+						WAITFOR DELAY ''00:00:02''
+					END
+			END		
 	END
 
 -- IF A SUBSCRIPTION IS CREATED AND AND A FAILOVER OCCURS THE SUBSCRIPTION WILL THEN EXIST ON BOTH NODES.  
