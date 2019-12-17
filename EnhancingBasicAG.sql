@@ -1,4 +1,8 @@
-USE [msdb]
+/*
+Added Template Parameters.  Use CTRL+Shift+M to specify Parameters
+  -- Code will not run unless you set the template parameters
+*/
+USE [msdb];
 GO
 
 IF EXISTS (SELECT 1 FROM sysjobs WHERE name = 'RestartReportingServicesService')
@@ -13,6 +17,7 @@ GO
 BEGIN TRANSACTION
 DECLARE @ReturnCode INT
 SELECT @ReturnCode = 0
+
 
 IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'AlwaysOn Maintenance' AND category_class=1)
 BEGIN
@@ -44,7 +49,7 @@ EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Restart 
 		@retry_attempts=0, 
 		@retry_interval=0, 
 		@os_run_priority=0, @subsystem=N'PowerShell', 
-		@command=N'Get-Service -ComputerName SQL2 -Name "SQL Server Reporting Services (STANDARD2016)" | Restart-Service', 
+		@command=N'Get-Service -ComputerName SQL2 -Name "<ReportServiceName, Nvarchar(50), SQL Server Reporting Services (MSSQLSERVER)>" | Restart-Service', 
 		@database_name=N'master', 
 		@flags=0
 IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
@@ -113,7 +118,7 @@ GO
 DECLARE @INTCOUNTER INT = 1
 	,@MAXINTCOUNTER INT
 	,@CMD			VARCHAR (250)
-	,@Delimiter varchar(1) = ''_''
+	,@Delimiter varchar(1) = ''<Delimerter, Nvarchar(1), _>''
 
 
 Declare @AG_Groups Table  -- TABLE TO STORE AG''S THAT NEED TO BE MOVED TO SAME SERVER THAT HOUSES THE LISTENER
@@ -166,7 +171,7 @@ DECLARE  @DesiredOperationalState	INT
 		,@ActualOperationalState	INT
 		,@ReportFailoverComplete	BIT = 0
 
-IF EXISTS (SELECT 1 FROM @AG_Groups where LEFT(RIGHT(ag_name,Len(ag_name)-CHARINDEX(@Delimiter,ag_name)),CHARINDEX(@Delimiter,RIGHT(ag_name,Len(ag_name)-CHARINDEX(@Delimiter,ag_name)-1))) = ''Reports'') -- ''REPORTS'' IS THE GROUP NAME FOR THE AG GROUPING THAT HAS THE REPORT SERVER DATABASE
+IF EXISTS (SELECT 1 FROM @AG_Groups where LEFT(RIGHT(ag_name,Len(ag_name)-CHARINDEX(@Delimiter,ag_name)),CHARINDEX(@Delimiter,RIGHT(ag_name,Len(ag_name)-CHARINDEX(@Delimiter,ag_name)-1))) = ''<ReportGroupName, Nvarchar(50), Reports>'') -- ''REPORTS'' IS THE GROUP NAME FOR THE AG GROUPING THAT HAS THE REPORT SERVER DATABASE
 	BEGIN
 		WHILE @ReportFailoverComplete = 0
 			BEGIN
@@ -175,7 +180,7 @@ IF EXISTS (SELECT 1 FROM @AG_Groups where LEFT(RIGHT(ag_name,Len(ag_name)-CHARIN
 				FROM sys.dm_hadr_name_id_map imap 
 				INNER JOIN sys.dm_hadr_availability_replica_states ARS ON ARS.group_id = imap.ag_id 
 				WHERE	ARS.is_local = 1  -- ONLY CONSIDER LOCAL REPLICA''S
-					AND	LOWER(LEFT(RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)),CHARINDEX(@Delimiter,RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)-1)))) = ''reports''
+					AND	LOWER(LEFT(RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)),CHARINDEX(@Delimiter,RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)-1)))) = ''<ReportGroupName, Nvarchar(50), Reports>''
 
 				IF ISNULL(@DesiredOperationalState,0) = ISNULL(@ActualOperationalState,0)
 					BEGIN
@@ -190,7 +195,7 @@ IF EXISTS (SELECT 1 FROM @AG_Groups where LEFT(RIGHT(ag_name,Len(ag_name)-CHARIN
 	END
 
 -- IF ONE NODE GOES DOWN AND AUTO FAILOVER HAPPENS RESTART REPORTING SERVICES IF SERVER HAS A REPORT SERVER DATABASE.  THIS IS NEEDED FOR WHEN AN AUTOMATIC FAILOVER OCCURS.
-IF		EXISTS (SELECT 1 WHERE sys.fn_hadr_is_primary_replica (''ReportServer'') = 1) 
+IF		EXISTS (SELECT 1 WHERE sys.fn_hadr_is_primary_replica (''<ReportServerDatabaseName, Nvarchar(50), ReportServer>'') = 1) 
 	AND EXISTS (SELECT 1 
 				FROM sys.dm_hadr_database_replica_cluster_states hdrcs
 				INNER JOIN sys.dm_hadr_availability_replica_cluster_states dharcs ON hdrcs.replica_id = dharcs.replica_id
@@ -208,7 +213,7 @@ IF		EXISTS (SELECT 1 WHERE sys.fn_hadr_is_primary_replica (''ReportServer'') = 1
 				FROM sys.dm_hadr_name_id_map imap 
 				INNER JOIN sys.dm_hadr_availability_replica_states ARS ON ARS.group_id = imap.ag_id 
 				WHERE	ARS.is_local = 1  -- ONLY CONSIDER LOCAL REPLICA''S
-					AND	LOWER(LEFT(RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)),CHARINDEX(@Delimiter,RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)-1)))) = ''reports''
+					AND	LOWER(LEFT(RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)),CHARINDEX(@Delimiter,RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)-1)))) = ''<ReportGroupName, Nvarchar(50), Reports>''
 
 				IF ISNULL(@DesiredOperationalState,0) = ISNULL(@ActualOperationalState,0)
 					BEGIN
@@ -226,13 +231,7 @@ IF		EXISTS (SELECT 1 WHERE sys.fn_hadr_is_primary_replica (''ReportServer'') = 1
 -- IF THE SUBSCRIPTION IS DELETED ON THE NEW REPLICA AND THEN FAILS BACK TO THE ORIGINAL REPLICA THE DELETED SUBSCRIPTION WILL STILL EXIST ON THE NOW PRIMARY REPLICA
 -- THIS SNIPPET OF CODE WILL DELETE ALL OF THE JOBS IN THE REPORT SERVER CATEGORY (THE DEFAULT CATEGORY FOR ALL CREATED SUBSCRIPTIONS).
 -- SINCE THE SUBSCRIPTIONS GET RECREATED ON FAILOVER, THIS SOLVES THE DELETE ISSUE AND ALLOWS US TO NOT EITHER DISABLE THE JOBS, HAVE FAILED JOBS, OR HAVE TO HAVE A PROCESS TO INJECT A PRIMARY NODE CHECK.
-IF EXISTS (
-	SELECT 1 FROM master.sys.dm_hadr_availability_replica_states AS arstates
-	INNER JOIN master.sys.dm_hadr_database_replica_cluster_states AS dbcs ON arstates.replica_id = dbcs.replica_id
-	WHERE	ISNULL(arstates.role, 3) = 2 
-		AND ISNULL(dbcs.is_database_joined, 0) = 1
-		AND	dbcs.database_name = ''ReportServer'' -- DATABASE NAME OF REPORT SERVER DATABASE
-		)
+IF		EXISTS (SELECT 1 WHERE sys.fn_hadr_is_primary_replica (''<ReportServerDatabaseName, Nvarchar(50), ReportServer>'') = 0) 
 	BEGIN
 		DECLARE @JobsToDelete TABLE
 		(ID INT IDENTITY (1,1)
