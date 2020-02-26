@@ -113,9 +113,7 @@ GO
 			@os_run_priority=0, @subsystem=N'TSQL', 
 			@command=N'USE [master]
 GO
-
 SET NOCOUNT ON
-
 DECLARE @INTCOUNTER				INT
 	,@MAXINTCOUNTER				INT
 	,@CMD						VARCHAR (250)
@@ -126,9 +124,6 @@ DECLARE @INTCOUNTER				INT
 	,@EndTime					Datetime = getdate()
 	,@DesiredOperationalState	INT
 	,@ActualOperationalState	INT
-
-
-
 Declare @AG_Groups Table  -- TABLE TO STORE AG''S THAT NEED TO BE MOVED TO SAME SERVER THAT HOUSES THE LISTENER
 (ID INT IDENTITY (1,1)
 ,ag_name NVARCHAR(512)
@@ -137,32 +132,21 @@ Declare @AG_Groups Table  -- TABLE TO STORE AG''S THAT NEED TO BE MOVED TO SAME 
 ,GroupName NVARCHAR(510)
 ,ReadyToFail BIT
 )
-
 DECLARE @AGsToFail TAble
 (ID INT IDENTITY(1,1)
 ,ag_name NVARCHAR(512)
 ,DBName NVARCHAR(512)
 )
-
 DECLARE @JobsToDelete TABLE
 (ID INT IDENTITY (1,1)
 ,Job_id UNIQUEIDENTIFIER
 )
-
 WHILE (@GroupsToFail <> 0 OR EXISTS (SELECT * FROM @AG_Groups WHERE UPPER(Role_Description) = ''RESOLVING'')) AND datediff(mi,@Starttime, @EndTime) < @MaxTimeToRuninMin
 	BEGIN
 		
-		SELECT @GroupsToFail = 0
 		DELETE @AGsToFail
 		DELETE @AG_Groups
 		DELETE @JobsToDelete
-
-
-		/*
-		Groups to fail at the start is not the right choice.  This is because things may be resolving or completed
-		wait, i need to have 1 ready to fail or 1 resolving to proceed.  This is right
-		I think i need to add that it is in sync and no data loss will occur before setting ready to fail flag
-		*/
 
 		;WITH CTE_Listner_Groups (ag_name, DbName, GroupName, GroupRoleDescription /* GROUP NAME IS based off of the naming convention */)
 		 AS (
@@ -177,8 +161,6 @@ WHILE (@GroupsToFail <> 0 OR EXISTS (SELECT * FROM @AG_Groups WHERE UPPER(Role_D
 		WHERE	UPPER(ARS.role_desc) <> ''SECONDARY''--= ''PRIMARY'' -- ONLY INCLUDE AG''S THAT ARE PRIMARY ON THIS REPLICA
 			AND	ARS.is_local = 1  -- ONLY CONSIDER LOCAL REPLICA''S
 			)
-
-
 		INSERT @AG_Groups  -- INSERT AG''S THAT ARE NOT PRIMARY ON THIS REPLICA BUT BELONG TO A GROUPING (VIA THE NAMING CONVENTION) THAT ARE PRIMARY AND HAVE A LISTENER
 		SELECT	 imap.ag_name
 				,cte.DbName
@@ -191,25 +173,24 @@ WHILE (@GroupsToFail <> 0 OR EXISTS (SELECT * FROM @AG_Groups WHERE UPPER(Role_D
 		INNER JOIN sys.dm_hadr_database_replica_cluster_states drcs ON ARS.replica_id = drcs.replica_id
 		WHERE	UPPER(ARS.role_desc) <> ''PRIMARY'' -- ONLY INCLUDE AG''S THAT ARE NOT PRIMARY ON THIS REPLICA
 			AND	ARS.is_local = 1  -- ONLY CONSIDER LOCAL REPLICA''S
-
-
-
 		SELECT @GroupsToFail = COUNT(*)
 		FROM @AG_Groups
 		WHERE ReadyToFail = 1
 
+		SELECT @GroupsToFail = COUNT(*)
+		FROM @AG_Groups
 		
-		SELECT	 @MAXINTCOUNTER = ISNULL(@GroupsToFail,0)
+		SELECT	 @MAXINTCOUNTER = count(*)
 				,@INTCOUNTER = 1
+		FROM @AG_Groups
+		WHERE ReadyToFail = 1
 
 		INSERT @AGsToFail
 		SELECT DISTINCT ag_name,DBName
 		FROM @AG_Groups
 		WHERE ReadyToFail = 1
-
 		WHILE @INTCOUNTER <= @MAXINTCOUNTER  -- BEGIN LOOP
 			BEGIN
-
 				SELECT	 @DesiredOperationalState = count(imap.ag_name)*2  /* OPERATIONAL_STATE ONLINE = 2 SO COUNT MUST BE DOUBLED*/
 						,@ActualOperationalState = SUM(CASE WHEN ARS.role = 2 then operational_state ELSE 0 END )  /* ONLY CONSIDER OPERATIONAL STATE WHEN DB IS PRIMARY ON THIS NODE.  THIS IS NOT IN WHERE CLAUSE TO AVOID FALSE GOOD CRITERIA.*/
 				FROM sys.dm_hadr_name_id_map imap 
@@ -217,28 +198,20 @@ WHILE (@GroupsToFail <> 0 OR EXISTS (SELECT * FROM @AG_Groups WHERE UPPER(Role_D
 				INNER JOIN @AGsToFail agf ON imap.ag_name = agf.ag_name 
 				WHERE	ARS.is_local = 1  -- ONLY CONSIDER LOCAL REPLICAS
 					AND	agf.ID = @INTCOUNTER
-
 				SELECT @CMD = ''IF EXISTS (SELECT 1 WHERE sys.fn_hadr_is_primary_replica ('''''' + DBName + '''''') = 1) AND ISNULL('' + cast(@DesiredOperationalState as varchar)+ '',0) = ISNULL('' + cast(@ActualOperationalState as varchar) + '',0) BEGIN ALTER AVAILABILITY GROUP ['' + ag_name + ''] FAILOVER; END''
 				FROM @AGsToFail
 				WHERE ID = @INTCOUNTER
 				
 				--PRINT @cmd
 				EXEC (@cmd) -- FAILOVER NON PRIMARY AG''S PREVIOUSLY DEFINED
-
 				DELETE @AGsToFail WHERE ID = @INTCOUNTER
-
 				SELECT @INTCOUNTER = @INTCOUNTER + 1
 				
 				SELECT @GroupsToFail = COUNT(1) FROM @AGsToFail WHERE ID >= @INTCOUNTER
-
 			END
-
-
-
 		-- REPORTING SERVICES MUST BE RESTARTED TO CREATE SUBSCRIPTIONS ON NEW REPLICA.
 		-- IF REPORTSERVER GROUPING IS INCLUDED IN FAILOVERS RESTART REPORT SERVER SERVICES
 		DECLARE  @ReportFailoverComplete	BIT = 0
-
 		IF EXISTS (SELECT 1 FROM @AG_Groups where GroupName = ''<ReportGroupName, Nvarchar(50), Reports>'' AND ReadyToFail = 1) -- ''REPORTS'' IS THE GROUP NAME FOR THE AG GROUPING THAT HAS THE REPORT SERVER DATABASE
 			BEGIN
 				WHILE @ReportFailoverComplete = 0
@@ -249,7 +222,6 @@ WHILE (@GroupsToFail <> 0 OR EXISTS (SELECT * FROM @AG_Groups WHERE UPPER(Role_D
 						INNER JOIN sys.dm_hadr_availability_replica_states ARS ON ARS.group_id = imap.ag_id 
 						WHERE	ARS.is_local = 1  -- ONLY CONSIDER LOCAL REPLICA''S
 							AND	LOWER(LEFT(RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)),CHARINDEX(@Delimiter,RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)-1)))) = ''<ReportGroupName, Nvarchar(50), Reports>''
-
 						IF ISNULL(@DesiredOperationalState,0) = ISNULL(@ActualOperationalState,0)
 							BEGIN
 								EXEC msdb.dbo.sp_start_job N''RestartReportingServicesService''
@@ -261,7 +233,6 @@ WHILE (@GroupsToFail <> 0 OR EXISTS (SELECT * FROM @AG_Groups WHERE UPPER(Role_D
 							END
 					END		
 			END
-
 		-- IF ONE NODE GOES DOWN AND AUTO FAILOVER HAPPENS RESTART REPORTING SERVICES IF SERVER HAS A REPORT SERVER DATABASE.  THIS IS NEEDED FOR WHEN AN AUTOMATIC FAILOVER OCCURS.
 		IF		EXISTS (SELECT 1 WHERE sys.fn_hadr_is_primary_replica (''<ReportServerDatabaseName, Nvarchar(50), ReportServer>'') = 1) 
 			AND EXISTS (SELECT 1 
@@ -282,7 +253,6 @@ WHILE (@GroupsToFail <> 0 OR EXISTS (SELECT * FROM @AG_Groups WHERE UPPER(Role_D
 						INNER JOIN sys.dm_hadr_availability_replica_states ARS ON ARS.group_id = imap.ag_id 
 						WHERE	ARS.is_local = 1  -- ONLY CONSIDER LOCAL REPLICA''S
 							AND	LOWER(LEFT(RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)),CHARINDEX(@Delimiter,RIGHT(ag_name,LEN(ag_name)-CHARINDEX(@Delimiter,ag_name)-1)))) = ''<ReportGroupName, Nvarchar(50), Reports>''
-
 						IF ISNULL(@DesiredOperationalState,0) = ISNULL(@ActualOperationalState,0)
 							BEGIN
 								EXEC msdb.dbo.sp_start_job N''RestartReportingServicesService''
@@ -294,7 +264,6 @@ WHILE (@GroupsToFail <> 0 OR EXISTS (SELECT * FROM @AG_Groups WHERE UPPER(Role_D
 							END
 					END		
 			END
-
 		-- IF A SUBSCRIPTION IS CREATED AND AND A FAILOVER OCCURS THE SUBSCRIPTION WILL THEN EXIST ON BOTH NODES.  
 		-- IF THE SUBSCRIPTION IS DELETED ON THE NEW REPLICA AND THEN FAILS BACK TO THE ORIGINAL REPLICA THE DELETED SUBSCRIPTION WILL STILL EXIST ON THE NOW PRIMARY REPLICA
 		-- THIS SNIPPET OF CODE WILL DELETE ALL OF THE JOBS IN THE REPORT SERVER CATEGORY (THE DEFAULT CATEGORY FOR ALL CREATED SUBSCRIPTIONS).
@@ -302,22 +271,18 @@ WHILE (@GroupsToFail <> 0 OR EXISTS (SELECT * FROM @AG_Groups WHERE UPPER(Role_D
 		IF		EXISTS (SELECT 1 WHERE sys.fn_hadr_is_primary_replica (''<ReportServerDatabaseName, Nvarchar(50), ReportServer>'') = 0) 
 		
 			BEGIN
-
 				DECLARE	 @Jobcount INT = 1
 						,@JobID UNIQUEIDENTIFIER
-
 				INSERT @JobsToDelete
 				SELECT  sj.job_id
 				FROM    msdb.dbo.sysjobs sj
 						INNER JOIN msdb.dbo.syscategories sc ON sc.category_id = sj.category_id
 				WHERE   sc.name = ''Report Server'' -- CATEGORY OF JOBS TO DELETE
-
 				WHILE @Jobcount <= (SELECT max(id) from @jobstoDelete)
 					BEGIN
 						SELECT @JobID = Job_id from @JobsToDelete where ID = @Jobcount
 		
 						EXEC msdb.dbo.sp_delete_job @job_id=@JobID, @delete_unused_schedule=1
-
 						SELECT @Jobcount = @Jobcount + 1
 					END
 			END
@@ -366,4 +331,3 @@ EXEC msdb.dbo.sp_add_alert @name=N'AlwaysOn Auto Failover Monitor',
 		@category_name=N'[Uncategorized]', 
 		@job_id= @NewJobID
 GO
-
